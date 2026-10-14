@@ -13,6 +13,8 @@ function App() {
   const [authMode, setAuthMode] = useState('login');
   const [auth, setAuth] = useState({ name: '', email: '', password: '' });
   const [authError, setAuthError] = useState('');
+  const [authSubmitting, setAuthSubmitting] = useState(false);
+  const authSubmittingRef = useRef(false);
   const [roomInput, setRoomInput] = useState('');
   const [roomId, setRoomId] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -51,13 +53,28 @@ function App() {
 
   async function submitAuth(e) {
     e.preventDefault(); setAuthError('');
+    if (authSubmittingRef.current) return;
     if (auth.password.length < 8) return setAuthError('Use a password with at least 8 characters.');
-    if (authMode === 'signup' && !auth.name.trim()) return setAuthError('Enter your name.');
+    if (authMode === 'signup' && auth.name.trim().length < 2) return setAuthError('Enter a name with at least 2 characters.');
+    authSubmittingRef.current = true;
+    setAuthSubmitting(true);
     try {
       const response = await fetch(`${API}/api/auth/${authMode}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(auth) });
-      const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not sign in.');
+      const responseText = await response.text();
+      let data = {};
+      if (responseText) {
+        try { data = JSON.parse(responseText); }
+        catch { throw new Error(`The server returned an unreadable response (HTTP ${response.status}). Check that the backend is running, then try again.`); }
+      }
+      if (!response.ok) throw new Error(data.error || `Could not ${authMode === 'signup' ? 'create your account' : 'sign in'} (HTTP ${response.status}).`);
+      if (!data.token || !data.user) throw new Error('The server did not complete authentication. Check the backend and try again.');
       localStorage.setItem(tokenKey, data.token); setUser(data.user); setDisplayName(data.user.name); setToken(data.token); setView('home');
-    } catch (err) { setAuthError(err.message); }
+    } catch (err) {
+      setAuthError(err instanceof TypeError ? 'Cannot reach the Orbit server. Start the backend, then retry.' : (err.message || 'Could not complete authentication. Please try again.'));
+    } finally {
+      authSubmittingRef.current = false;
+      setAuthSubmitting(false);
+    }
   }
   function logout() { localStorage.removeItem(tokenKey); setToken(null); setUser(null); setView('home'); }
 
@@ -250,7 +267,7 @@ function App() {
 
   const previewVideo = (stream, muted = false) => { const ref = node => { if (node && node.srcObject !== stream) node.srcObject = stream; }; return <video ref={ref} autoPlay playsInline muted={muted} />; };
   const chatText = item => <div className="msg-body">{item.text}{item.file && <a className="file-link" href={item.file} download={item.fileName}><Paperclip size={14} /> Download {item.fileName}</a>}</div>;
-  if (view === 'auth') return <div className="auth-page"><div className="auth-art"><div className="auth-orbit"><span /><span /><span /><div className="auth-core"><Video size={30}/></div></div><p>Work feels closer,<br/>wherever you are.</p><small>A little more human, a lot more together.</small></div><div className="auth-side"><button className="brand auth-brand" onClick={() => setView('home')}><span className="brand-mark"><Video size={18}/></span>orbit</button><form className="auth-form" onSubmit={submitAuth}><div className="eyebrow">YOUR SPACE TO CONNECT</div><h1>{authMode === 'login' ? 'Welcome back' : 'Join the conversation'}</h1><p className="muted">{authMode === 'login' ? 'Sign in to get back to your meetings.' : 'Create an account and bring your team closer.'}</p>{authMode === 'signup' && <label>Your name<input required minLength="2" autoComplete="name" value={auth.name} onChange={e => setAuth({...auth, name: e.target.value})} placeholder="Alex Morgan"/></label>}<label>Email address<input required type="email" autoComplete="email" value={auth.email} onChange={e => setAuth({...auth, email: e.target.value})} placeholder="you@company.com"/></label><label>Password<input required type="password" minLength="8" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} value={auth.password} onChange={e => setAuth({...auth, password: e.target.value})} placeholder="At least 8 characters"/></label>{authError && <div className="error-text">{authError}</div>}<button className="primary wide">{authMode === 'login' ? 'Sign in' : 'Create account'}<ArrowRight size={17}/></button><div className="auth-switch">{authMode === 'login' ? 'New to Orbit?' : 'Already have an account?'} <button type="button" onClick={() => {setAuthMode(authMode === 'login' ? 'signup' : 'login'); setAuthError('');}}>{authMode === 'login' ? 'Create an account' : 'Sign in'}</button></div></form><div className="auth-foot"><Shield size={14}/> Your conversations stay private.</div></div></div>;
+  if (view === 'auth') return <div className="auth-page"><div className="auth-art"><div className="auth-orbit"><span /><span /><span /><div className="auth-core"><Video size={30}/></div></div><p>Work feels closer,<br/>wherever you are.</p><small>A little more human, a lot more together.</small></div><div className="auth-side"><button className="brand auth-brand" onClick={() => setView('home')}><span className="brand-mark"><Video size={18}/></span>orbit</button><form className="auth-form" onSubmit={submitAuth}><div className="eyebrow">YOUR SPACE TO CONNECT</div><h1>{authMode === 'login' ? 'Welcome back' : 'Join the conversation'}</h1><p className="muted">{authMode === 'login' ? 'Sign in to get back to your meetings.' : 'Create an account and bring your team closer.'}</p>{authMode === 'signup' && <label>Your name<input required minLength="2" autoComplete="name" value={auth.name} onChange={e => setAuth({...auth, name: e.target.value})} placeholder="Alex Morgan"/></label>}<label>Email address<input required type="email" autoComplete="email" value={auth.email} onChange={e => setAuth({...auth, email: e.target.value})} placeholder="you@company.com"/></label><label>Password<input required type="password" minLength="8" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} value={auth.password} onChange={e => setAuth({...auth, password: e.target.value})} placeholder="At least 8 characters"/></label>{authError && <div className="error-text" role="alert">{authError}</div>}<button className="primary wide" disabled={authSubmitting}>{authSubmitting ? (authMode === 'login' ? 'Signing in…' : 'Creating account…') : (authMode === 'login' ? 'Sign in' : 'Create account')}<ArrowRight size={17}/></button><div className="auth-switch">{authMode === 'login' ? 'New to Orbit?' : 'Already have an account?'} <button type="button" disabled={authSubmitting} onClick={() => {setAuthMode(authMode === 'login' ? 'signup' : 'login'); setAuthError('');}}>{authMode === 'login' ? 'Create an account' : 'Sign in'}</button></div></form><div className="auth-foot"><Shield size={14}/> Your conversations stay private.</div></div></div>;
 
   if (view === 'meeting') return <div className="meeting-shell"><header className="meeting-top"><button className="brand" onClick={leaveRoom}><span className="brand-mark"><Video size={17}/></span>orbit</button><div className="meeting-meta"><span className={`live-dot ${connected ? '' : 'offline'}`} />{connected ? 'Live room' : 'Connecting'}<span className="dot-sep">·</span><span className="room-code">{roomId}</span><button className="icon-button subtle" onClick={copyInvite} title="Copy invite link">{copied ? <Check size={15}/> : <Copy size={15}/>}<span>{copied ? 'Copied' : 'Invite'}</span></button></div><div className="header-right"><span className="secure-tag"><Shield size={13}/>Private</span><div className="avatar small-avatar">{(displayName || 'G')[0].toUpperCase()}</div></div></header>
     {mediaError && <div className="meeting-alert">{mediaError}<button onClick={() => setMediaError('')}><X size={15}/></button></div>}

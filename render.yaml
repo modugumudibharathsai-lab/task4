@@ -7,7 +7,7 @@ services:
     repo: https://github.com/modugumudibharathsai-lab/task4
     branch: main
     autoDeployTrigger: commit
-    buildCommand: npm install && npm run build
+    buildCommand: npm ci && npm run build
     startCommand: npm start
     healthCheckPath: /api/health
     envVars:

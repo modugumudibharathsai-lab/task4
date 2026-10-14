@@ -1,7 +1,7 @@
-import 'dotenv/config';
 import http from 'node:http';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -12,6 +12,10 @@ import authRoutes from './routes/auth.js';
 import roomRoutes from './routes/rooms.js';
 import { configureSockets } from './socket.js';
 import { connectStorage } from './storage.js';
+
+// Resolve the documented local env file from this module, not process.cwd().
+// Render injects its environment variables and does not need a checked-in .env.
+dotenv.config({ path: fileURLToPath(new URL('../.env', import.meta.url)) });
 
 const required = ['JWT_SECRET', 'MONGODB_URI'];
 for (const key of required) if (!process.env[key]) throw new Error(`${key} must be set in server/.env`);
