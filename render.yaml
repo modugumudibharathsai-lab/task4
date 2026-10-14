@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: orbit-video-collab
+    runtime: node
+    plan: free
+    region: singapore
+    repo: https://github.com/modugumudibharathsai-lab/task4
+    branch: main
+    autoDeployTrigger: commit
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 1d
+      - key: MONGODB_URI
+        sync: false

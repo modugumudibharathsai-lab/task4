@@ -20,8 +20,9 @@ const app = express();
 const server = http.createServer(app);
 const configuredOrigins = (process.env.CLIENT_ORIGIN || '').split(',').map(s => s.trim()).filter(Boolean).map(origin => /^https?:\/\//i.test(origin) ? origin : `https://${origin}`);
 const railwayOrigin = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null;
+const renderOrigin = process.env.RENDER_EXTERNAL_URL || null;
 const localOrigins = process.env.NODE_ENV === 'production' ? [] : ['http://localhost:5173', 'http://127.0.0.1:5173'];
-const origins = [...new Set([...configuredOrigins, ...(railwayOrigin ? [railwayOrigin] : []), ...localOrigins])];
+const origins = [...new Set([...configuredOrigins, ...(railwayOrigin ? [railwayOrigin] : []), ...(renderOrigin ? [renderOrigin] : []), ...localOrigins])];
 const io = new Server(server, { cors: { origin: origins, methods: ['GET','POST'], credentials: false }, maxHttpBufferSize: 1e6, pingTimeout: 20000 });
 
 app.disable('x-powered-by');

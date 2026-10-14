@@ -54,14 +54,23 @@ Deploy the API behind HTTPS with WebSocket proxy support and the client over HTT
 
 Run `npm run build` to build the static client into `client/dist`; `npm start` launches the Express server, which serves both the API/signaling endpoints and the built React app. The client uses the same origin for API and Socket.IO in production. During Vite development it uses `http://localhost:4000` by default; set `VITE_API_URL` in `client/.env.local` if your API uses another local origin.
 
-## Deploy to Railway
+## Deploy to Railway or Render
 
-This repository is configured as a single Railway web service. Railway uses the root `railway.json`, installs the npm workspaces, runs `npm run build`, then starts `npm start`. Express serves `client/dist`, so one public domain handles the site, REST API, and Socket.IO signaling.
+This repository supports single-service deployment on Railway and Render. Both hosts can build the root npm workspaces and run the Express server, which serves `client/dist`, the REST API, and Socket.IO on one public domain. `railway.json` configures Railway; `render.yaml` configures Render.
 
-1. Sign in to Railway, create a project, choose **Deploy from GitHub repo**, and select `modugumudibharathsai-lab/task4`. Allow Railway to access the repository if asked.
-2. Add a MongoDB database reachable from Railway, either through Railway's MongoDB template or an external MongoDB provider. Copy its connection string.
-3. In the app service's **Variables** settings, add `MONGODB_URI` with that connection string and `JWT_SECRET` with a unique random value of at least 32 characters. You can also set `JWT_EXPIRES_IN` (default `1d`). Railway supplies `PORT` and `RAILWAY_PUBLIC_DOMAIN`; the server uses the assigned port and allows the Railway public origin for Socket.IO. If you use a custom domain or separate client origin, set `CLIENT_ORIGIN` to the exact origin, including `https://` (multiple origins may be comma-separated).
-4. In **Settings → Networking**, generate a public domain (or attach your custom domain), then wait for the deployment health check at `/api/health` to pass.
-5. Open the generated HTTPS domain, create an account, and start a meeting. For reliable calling through restrictive networks, configure a TURN service. Vite build-time TURN variables must be set on the Railway service before deployment as `VITE_TURN_URL`, `VITE_TURN_USERNAME`, and `VITE_TURN_CREDENTIAL`.
+### Render
 
-Do not set a fixed `PORT` on Railway and do not commit `.env` files. Keep `MONGODB_URI`, `JWT_SECRET`, and TURN credentials in Railway's Variables settings.
+1. Sign in to Render and create a **Blueprint** from this repository: <https://dashboard.render.com/blueprints>. Render needs GitHub access to read the repository and its `render.yaml` file.
+2. The Blueprint defines one Node web service on Render's free plan, using the Singapore region, `npm install && npm run build`, `npm start`, and `/api/health` for health checks. Review the plan in Render before creating it; free services can sleep when idle, which may delay the first visit and interrupt long-lived meetings during host maintenance.
+3. Provide `MONGODB_URI` when Render prompts for it. Use a reachable MongoDB Atlas connection string and configure Atlas network access and a database user. Render generates `JWT_SECRET` for the service. Do not paste database credentials into source files or commit them.
+4. Create the Blueprint and wait for the health check to pass. Render sets `PORT` and `RENDER_EXTERNAL_URL`; the server uses these for its listener and Socket.IO origin.
+5. Open the service's HTTPS URL, create an account, and start a meeting. For reliable calls through restrictive networks, configure a TURN server. Set `VITE_TURN_URL`, `VITE_TURN_USERNAME`, and `VITE_TURN_CREDENTIAL` on the Render service before building.
+
+### Railway
+
+1. Create a project and choose **Deploy from GitHub repo**, then select `modugumudibharathsai-lab/task4`.
+2. Add a reachable MongoDB connection string as `MONGODB_URI` and set `JWT_SECRET` to a unique random value of at least 32 characters. Optionally set `JWT_EXPIRES_IN` (default `1d`).
+3. Generate a public domain under **Settings → Networking**. Railway supplies `PORT` and `RAILWAY_PUBLIC_DOMAIN`; the server uses them for the listener and Socket.IO origin.
+4. Wait for `/api/health` to pass, then open the generated HTTPS domain.
+
+Do not set a fixed `PORT` on Railway or Render and do not commit `.env` files. Keep `MONGODB_URI`, `JWT_SECRET`, and TURN credentials in the hosting provider's secret variables.
