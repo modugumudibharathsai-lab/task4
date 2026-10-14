@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently -k -n server,client -c blue,green \"npm:dev --workspace server\" \"npm:dev --workspace client\"",
     "build": "npm run build --workspace client",
-    "start": "npm run start --workspace server"
+    "start": "node server/server.js"
   },
   "devDependencies": { "concurrently": "^9.1.2" }
 }
