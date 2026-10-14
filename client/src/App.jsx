@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
-import { Video, Mic, MicOff, VideoOff, MonitorUp, PhoneOff, MessageSquare, Users, PenTool, Paperclip, Copy, Shield, Plus, ArrowRight, X, Send, Camera, Circle, Eraser, Trash2, Link2, Check, Wifi, Sparkles } from 'lucide-react';
+import { Video, Mic, MicOff, VideoOff, MonitorUp, PhoneOff, MessageSquare, Users, PenTool, Paperclip, Copy, Shield, Plus, ArrowRight, X, Send, Camera, Circle, Eraser, Trash2, Link2, Check, Wifi, Sparkles, Square } from 'lucide-react';
 
 const API = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:4000' : window.location.origin);
 const tokenKey = 'orbit_token';
@@ -16,7 +16,7 @@ function App() {
   const [roomInput, setRoomInput] = useState('');
   const [roomId, setRoomId] = useState('');
   const [displayName, setDisplayName] = useState('');
-  const [socket, setSocket] = useState(null);
+  const socketRef = useRef(null);
   const [participants, setParticipants] = useState([]);
   const [localStream, setLocalStream] = useState(null);
   const [mediaError, setMediaError] = useState('');
@@ -33,14 +33,21 @@ function App() {
   const streamRef = useRef(null);
   const shareRef = useRef(null);
   const canvasRef = useRef(null);
-  const drawing = useRef(false);
+  const drawing = useRef(null);
   const incomingFiles = useRef(new Map());
+  const pendingIce = useRef(new Map());
+  const boardOperations = useRef([]);
   const [tool, setTool] = useState('pen');
   const [color, setColor] = useState('#7c8cff');
   const [stroke, setStroke] = useState(3);
 
   useEffect(() => { if (token) fetch(`${API}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } }).then(r => r.ok ? r.json() : Promise.reject()).then(d => { setUser(d.user); setDisplayName(d.user.name); }).catch(() => logout()); }, [token]);
-  useEffect(() => () => { streamRef.current?.getTracks().forEach(t => t.stop()); shareRef.current?.getTracks().forEach(t => t.stop()); peers.current.forEach(p => p.close()); socket?.disconnect(); }, [socket]);
+  useEffect(() => () => {
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    shareRef.current?.getTracks().forEach(t => t.stop());
+    peers.current.forEach(p => p.close());
+    socketRef.current?.disconnect();
+  }, []);
 
   async function submitAuth(e) {
     e.preventDefault(); setAuthError('');
@@ -61,79 +68,184 @@ function App() {
     try { stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' } }); }
     catch (err) { setMediaError(err.name === 'NotAllowedError' ? 'Camera or microphone access was denied. You can still join to chat.' : 'Camera or microphone is unavailable. You can still join to chat.'); }
     streamRef.current = stream; setLocalStream(stream); setCamOn(Boolean(stream?.getVideoTracks().length)); setMicOn(Boolean(stream?.getAudioTracks().length));
-    const s = io(API, { auth: { token: token || undefined }, transports: ['websocket', 'polling'] }); setSocket(s);
+    const s = io(API, { auth: { token: token || undefined }, transports: ['websocket', 'polling'] }); socketRef.current = s;
     s.on('connect', () => { s.emit('room:join', { roomId: id.toUpperCase(), name: displayName || user?.name || 'Guest' }); setConnected(true); });
     s.on('connect_error', err => setMediaError(err.message || 'Could not connect to the meeting server.'));
     s.on('room:peers', async list => { setParticipants(list); for (const person of list) await callPeer(person.id); });
     s.on('peer:joined', person => setParticipants(current => current.some(p => p.id === person.id) ? current : [...current, person]));
     s.on('peer:left', id2 => { peers.current.get(id2)?.close(); peers.current.delete(id2); setParticipants(current => current.filter(p => p.id !== id2)); });
+    s.on('peer:screen', ({ id: peerId, sharing: peerSharing }) => setParticipants(current => current.map(person => person.id === peerId ? { ...person, sharing: peerSharing } : person)));
     s.on('signal', async ({ from, data }) => handleSignal(from, data));
     s.on('chat:message', item => setChat(current => [...current, item]));
     s.on('board:draw', data => drawRemote(data));
     s.on('board:clear', () => clearCanvas(false));
+    s.on('board:history', history => {
+      if (!Array.isArray(history)) return;
+      boardOperations.current = history.filter(item => item && Number.isFinite(item.x0) && Number.isFinite(item.y0) && Number.isFinite(item.x1) && Number.isFinite(item.y1));
+      redrawBoard();
+    });
     s.on('room:error', e => setMediaError(e.message));
   }
-  function makePeer(id) {
+  function attachFileChannel(channel, peerId) {
+    channel.binaryType = 'arraybuffer';
+    channel.bufferedAmountLowThreshold = 256 * 1024;
+    channel.onmessage = event => {
+      try {
+        const packet = JSON.parse(event.data);
+        if (packet.type === 'file-start' && typeof packet.id === 'string' && typeof packet.name === 'string' && Number.isInteger(packet.count) && packet.count > 0 && packet.count <= 400) {
+          incomingFiles.current.set(packet.id, { name: packet.name.slice(0, 180), owner: typeof packet.owner === 'string' ? packet.owner.slice(0, 60) : 'Guest', peerId, mime: typeof packet.mime === 'string' ? packet.mime.slice(0, 100) : 'application/octet-stream', count: packet.count, chunks: new Array(packet.count), received: 0 });
+        } else if (packet.type === 'file-part' && typeof packet.id === 'string' && Number.isInteger(packet.i) && typeof packet.chunk === 'string') {
+          const transfer = incomingFiles.current.get(packet.id);
+          if (transfer && packet.i >= 0 && packet.i < transfer.count && !transfer.chunks[packet.i]) { transfer.chunks[packet.i] = packet.chunk; transfer.received++; }
+        } else if (packet.type === 'file-end' && typeof packet.id === 'string') {
+          const transfer = incomingFiles.current.get(packet.id);
+          if (transfer && transfer.received === transfer.count) {
+            const data = transfer.chunks.join('');
+            const blob = new Blob([Uint8Array.from(atob(data.slice(data.indexOf(',') + 1)), ch => ch.charCodeAt(0))], { type: transfer.mime });
+            setChat(current => [...current, { id: crypto.randomUUID(), name: transfer.owner || 'Guest', text: `Shared a file: ${transfer.name}`, file: URL.createObjectURL(blob), fileName: transfer.name, time: new Date().toISOString() }]);
+            incomingFiles.current.delete(packet.id);
+          }
+        }
+      } catch { setMediaError('A shared file could not be received.'); }
+    };
+    channel.onclose = () => incomingFiles.current.forEach((transfer, transferId) => { if (transfer.peerId === peerId) incomingFiles.current.delete(transferId); });
+  }
+
+  function makePeer(id, isOfferer = false) {
     const pc = new RTCPeerConnection(iceConfig);
     peers.current.set(id, pc);
-    (streamRef.current?.getTracks() || []).forEach(track => pc.addTrack(track, streamRef.current));
-    pc.onicecandidate = e => { if (e.candidate) socket?.emit('signal', { to: id, data: { candidate: e.candidate } }); };
-    pc.ontrack = e => setParticipants(current => current.map(p => p.id === id ? { ...p, stream: e.streams[0] } : p));
-    pc.onnegotiationneeded = async () => { if (pc.signalingState !== 'stable') return; try { const offer = await pc.createOffer(); await pc.setLocalDescription(offer); socket?.emit('signal', { to: id, data: { description: pc.localDescription } }); } catch { setMediaError('Could not update the peer connection. Please rejoin the room.'); } };
-    pc.ondatachannel = event => {
-      const channel = event.channel;
-      channel.onmessage = messageEvent => {
-        try {
-          const packet = JSON.parse(messageEvent.data);
-          if (packet.type === 'file-start' && typeof packet.id === 'string' && typeof packet.name === 'string' && Number.isInteger(packet.count) && packet.count > 0 && packet.count <= 400) {
-            incomingFiles.current.set(packet.id, { name: packet.name.slice(0, 180), mime: typeof packet.mime === 'string' ? packet.mime.slice(0, 100) : 'application/octet-stream', count: packet.count, chunks: new Array(packet.count), received: 0 });
-          } else if (packet.type === 'file-part' && typeof packet.id === 'string' && Number.isInteger(packet.i) && typeof packet.chunk === 'string') {
-            const transfer = incomingFiles.current.get(packet.id);
-            if (transfer && packet.i >= 0 && packet.i < transfer.count && !transfer.chunks[packet.i]) { transfer.chunks[packet.i] = packet.chunk; transfer.received++; }
-          } else if (packet.type === 'file-end' && typeof packet.id === 'string') {
-            const transfer = incomingFiles.current.get(packet.id);
-            if (transfer && transfer.received === transfer.count) {
-              const data = transfer.chunks.join('');
-              const blob = new Blob([Uint8Array.from(atob(data.slice(data.indexOf(',') + 1)), ch => ch.charCodeAt(0))], { type: transfer.mime });
-              setChat(current => [...current, { id: crypto.randomUUID(), name: participants.find(p => p.id === id)?.name || 'Guest', text: `Shared a file: ${transfer.name}`, file: URL.createObjectURL(blob), fileName: transfer.name, time: new Date().toISOString() }]);
-              incomingFiles.current.delete(packet.id);
-            }
-          }
-        } catch { setMediaError('A shared file could not be received.'); }
-      };
+    const localTracks = streamRef.current?.getTracks() || [];
+    localTracks.forEach(track => pc.addTrack(track, streamRef.current));
+    for (const kind of ['audio', 'video']) {
+      if (!localTracks.some(track => track.kind === kind)) pc.addTransceiver(kind, { direction: 'sendrecv' });
+    }
+    if (shareRef.current?.getVideoTracks()[0]) {
+      const videoSender = pc.getTransceivers().find(transceiver => transceiver.receiver.track.kind === 'video')?.sender;
+      videoSender?.replaceTrack(shareRef.current.getVideoTracks()[0]).catch(() => setMediaError('Could not share your screen with a new participant.'));
+    }
+    pc.onicecandidate = e => { if (e.candidate) socketRef.current?.emit('signal', { to: id, data: { candidate: e.candidate } }); };
+    pc.ontrack = e => {
+      const remoteStream = e.streams[0] || new MediaStream([e.track]);
+      setParticipants(current => current.map(p => p.id === id ? { ...p, stream: remoteStream } : p));
     };
+    pc.ondatachannel = event => {
+      pc.fileChannel = event.channel;
+      pc.fileQueue = Promise.resolve();
+      attachFileChannel(event.channel, id);
+    };
+    if (isOfferer) {
+      pc.fileChannel = pc.createDataChannel('room-files', { ordered: true });
+      attachFileChannel(pc.fileChannel, id);
+      pc.fileQueue = Promise.resolve();
+    }
     pc.onconnectionstatechange = () => { if (['failed', 'closed'].includes(pc.connectionState)) { peers.current.delete(id); setParticipants(current => current.map(p => p.id === id ? { ...p, stream: null } : p)); } };
     return pc;
   }
-  async function callPeer(id) { if (peers.current.has(id)) return; const pc = makePeer(id); try { const offer = await pc.createOffer(); await pc.setLocalDescription(offer); socket?.emit('signal', { to: id, data: { description: pc.localDescription } }); } catch { setMediaError('Could not establish a peer connection. Check your network or TURN settings.'); } }
+  async function callPeer(id) { if (peers.current.has(id)) return; const pc = makePeer(id, true); try { const offer = await pc.createOffer(); await pc.setLocalDescription(offer); socketRef.current?.emit('signal', { to: id, data: { description: pc.localDescription } }); } catch { setMediaError('Could not establish a peer connection. Check your network or TURN settings.'); } }
   async function handleSignal(from, data) {
     let pc = peers.current.get(from); if (!pc) pc = makePeer(from);
     try {
-      if (data.description) { await pc.setRemoteDescription(data.description); if (data.description.type === 'offer') { const answer = await pc.createAnswer(); await pc.setLocalDescription(answer); socket?.emit('signal', { to: from, data: { description: pc.localDescription } }); } }
-      else if (data.candidate) await pc.addIceCandidate(data.candidate);
+      if (data.description) { await pc.setRemoteDescription(data.description); if (data.description.type === 'offer') { const answer = await pc.createAnswer(); await pc.setLocalDescription(answer); socketRef.current?.emit('signal', { to: from, data: { description: pc.localDescription } }); } }
+      else if (data.candidate) {
+        if (pc.remoteDescription) await pc.addIceCandidate(data.candidate);
+        else pendingIce.current.set(from, [...(pendingIce.current.get(from) || []), data.candidate]);
+      }
+      if (data.description && pc.remoteDescription) {
+        const queued = pendingIce.current.get(from) || [];
+        pendingIce.current.delete(from);
+        for (const candidate of queued) await pc.addIceCandidate(candidate);
+      }
     } catch { setMediaError('A peer connection could not be negotiated. Try rejoining the room.'); }
   }
-  function leaveRoom() { socket?.emit('room:leave'); socket?.disconnect(); setSocket(null); peers.current.forEach(p => p.close()); peers.current.clear(); streamRef.current?.getTracks().forEach(t => t.stop()); streamRef.current = null; shareRef.current?.getTracks().forEach(t => t.stop()); shareRef.current = null; setLocalStream(null); setSharing(false); setParticipants([]); setConnected(false); setView('home'); }
-  function toggleMic() { const on = !micOn; streamRef.current?.getAudioTracks().forEach(t => { t.enabled = on; }); setMicOn(on); }
-  function toggleCam() { const on = !camOn; streamRef.current?.getVideoTracks().forEach(t => { t.enabled = on; }); setCamOn(on); }
+  function leaveRoom() { socketRef.current?.emit('room:leave'); socketRef.current?.disconnect(); socketRef.current = null; peers.current.forEach(p => p.close()); peers.current.clear(); pendingIce.current.clear(); streamRef.current?.getTracks().forEach(t => t.stop()); streamRef.current = null; shareRef.current?.getTracks().forEach(t => t.stop()); shareRef.current = null; boardOperations.current = []; setLocalStream(null); setSharing(false); setParticipants([]); setConnected(false); setView('home'); }
+  async function acquireTrack(kind) {
+    const trackName = kind === 'audio' ? 'audio' : 'video';
+    try {
+      const fresh = await navigator.mediaDevices.getUserMedia({ [trackName]: true });
+      const track = fresh.getTracks().find(item => item.kind === kind);
+      const current = streamRef.current || new MediaStream();
+      for (const previous of current.getTracks().filter(item => item.kind === kind)) { current.removeTrack(previous); previous.stop(); }
+      current.addTrack(track);
+      streamRef.current = current;
+      if (kind === 'video' && !sharing) {
+        for (const pc of peers.current.values()) {
+          const sender = pc.getTransceivers().find(item => item.receiver.track.kind === kind)?.sender;
+          if (sender) await sender.replaceTrack(track);
+        }
+      } else if (kind === 'audio') {
+        for (const pc of peers.current.values()) {
+          const sender = pc.getTransceivers().find(item => item.receiver.track.kind === kind)?.sender;
+          if (sender) await sender.replaceTrack(track);
+        }
+      }
+      setLocalStream(new MediaStream(current.getTracks()));
+      if (kind === 'audio') setMicOn(true); else setCamOn(true);
+    } catch { setMediaError(`Could not access your ${kind === 'audio' ? 'microphone' : 'camera'}. Check the browser permission and device, then try again.`); }
+  }
+  async function toggleMic() { const track = streamRef.current?.getAudioTracks()[0]; if (!track || track.readyState === 'ended') return acquireTrack('audio'); const on = !micOn; track.enabled = on; setMicOn(on); }
+  async function toggleCam() { const track = streamRef.current?.getVideoTracks()[0]; if (!track || track.readyState === 'ended') return acquireTrack('video'); const on = !camOn; track.enabled = on; setCamOn(on); }
   async function toggleShare() {
-    if (sharing) { shareRef.current?.getTracks().forEach(t => t.stop()); shareRef.current = null; for (const pc of peers.current.values()) { const sender = pc.getSenders().find(s => s.track?.kind === 'video'); if (sender) sender.replaceTrack(streamRef.current?.getVideoTracks()[0] || null); } setSharing(false); return; }
-    try { const screen = await navigator.mediaDevices.getDisplayMedia({ video: true }); const track = screen.getVideoTracks()[0]; shareRef.current = screen; for (const pc of peers.current.values()) { const sender = pc.getSenders().find(s => s.track?.kind === 'video'); if (sender) sender.replaceTrack(track); } track.onended = () => { if (shareRef.current) toggleShare(); }; setSharing(true); }
+    if (sharing) { shareRef.current?.getTracks().forEach(t => t.stop()); shareRef.current = null; for (const pc of peers.current.values()) { const sender = pc.getTransceivers().find(t => t.receiver.track.kind === 'video')?.sender; if (sender) await sender.replaceTrack(streamRef.current?.getVideoTracks()[0] || null); } socketRef.current?.emit('screen:sharing', { sharing: false }); setSharing(false); return; }
+    try { const screen = await navigator.mediaDevices.getDisplayMedia({ video: true }); const track = screen.getVideoTracks()[0]; shareRef.current = screen; for (const pc of peers.current.values()) { const sender = pc.getTransceivers().find(t => t.receiver.track.kind === 'video')?.sender; if (sender) await sender.replaceTrack(track); } track.onended = () => { if (shareRef.current) toggleShare(); }; socketRef.current?.emit('screen:sharing', { sharing: true }); setSharing(true); }
     catch (err) { if (err.name !== 'NotAllowedError') setMediaError('Screen sharing could not start.'); }
   }
   async function switchCamera() {
-    try { const current = streamRef.current; const old = current?.getVideoTracks()[0]; const fresh = await navigator.mediaDevices.getUserMedia({ video: { facingMode: old?.getSettings().facingMode === 'environment' ? 'user' : 'environment' } }); const track = fresh.getVideoTracks()[0]; current?.removeTrack(old); old?.stop(); current?.addTrack(track); for (const pc of peers.current.values()) { const sender = pc.getSenders().find(s => s.track?.kind === 'video'); if (sender) await sender.replaceTrack(track); } setLocalStream(new MediaStream(current?.getTracks() || [track])); setCamOn(true); } catch { setMediaError('Could not switch camera on this device.'); }
+    try { const current = streamRef.current; if (!current) throw new Error('Camera is not available.'); const old = current.getVideoTracks()[0]; const fresh = await navigator.mediaDevices.getUserMedia({ video: { facingMode: old?.getSettings().facingMode === 'environment' ? 'user' : 'environment' } }); const track = fresh.getVideoTracks()[0]; if (old) current.removeTrack(old); old?.stop(); current.addTrack(track); if (!sharing) { for (const pc of peers.current.values()) { const sender = pc.getTransceivers().find(t => t.receiver.track.kind === 'video')?.sender; if (sender) await sender.replaceTrack(track); } } setLocalStream(new MediaStream(current.getTracks())); setCamOn(true); } catch { setMediaError('Could not switch camera on this device.'); }
   }
-  function sendMessage(e) { e.preventDefault(); const text = message.trim(); if (!text || !socket) return; socket.emit('chat:message', { text }); setMessage(''); }
+  function sendMessage(e) { e.preventDefault(); const text = message.trim(); if (!text || !socketRef.current?.connected) return; socketRef.current.emit('chat:message', { text }); setMessage(''); }
   function copyInvite() { navigator.clipboard?.writeText(`${location.origin}/?room=${roomId}`).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1800); }); }
-  function uploadFile(file) { if (!file || file.size > 12 * 1024 * 1024) { setMediaError('Files must be smaller than 12 MB.'); return; } if (peers.current.size === 0) { setMediaError('A peer must be connected before you can share a file.'); return; } const reader = new FileReader(); reader.onload = () => { const data = String(reader.result); const id = crypto.randomUUID(); const chunks = data.match(/.{1,48000}/gs) || []; peers.current.forEach(pc => { const dc = pc.createDataChannel('file'); dc.binaryType = 'arraybuffer'; dc.bufferedAmountLowThreshold = 256 * 1024; dc.onopen = async () => { try { dc.send(JSON.stringify({ type: 'file-start', id, name: file.name, mime: file.type, count: chunks.length })); for (let i = 0; i < chunks.length; i++) { while (dc.bufferedAmount > 512 * 1024 && dc.readyState === 'open') await new Promise(resolve => { dc.onbufferedamountlow = resolve; }); if (dc.readyState !== 'open') return; dc.send(JSON.stringify({ type: 'file-part', id, i, chunk: chunks[i] })); } dc.send(JSON.stringify({ type: 'file-end', id })); } catch { setMediaError(`Could not send ${file.name} to a participant.`); } }; }); setChat(c => [...c, { id: crypto.randomUUID(), name: displayName, text: `Shared a file: ${file.name}`, file: data, fileName: file.name, fileType: file.type, time: new Date().toISOString() }]); }; reader.readAsDataURL(file); }
+  async function transmitFile(channel, file, data, id) {
+    if (!channel) throw new Error('File sharing is not available for a participant yet. Rejoin the room and try again.');
+    if (channel.readyState !== 'open') {
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('File transfer connection timed out.')), 20000);
+        channel.addEventListener('open', () => { clearTimeout(timeout); resolve(); }, { once: true });
+        channel.addEventListener('close', () => { clearTimeout(timeout); reject(new Error('The file transfer connection closed.')); }, { once: true });
+      });
+    }
+    const chunks = data.match(/.{1,48000}/gs) || [];
+    channel.send(JSON.stringify({ type: 'file-start', id, owner: displayName || user?.name || 'Guest', name: file.name, mime: file.type, count: chunks.length }));
+    for (let i = 0; i < chunks.length; i++) {
+      while (channel.bufferedAmount > 512 * 1024 && channel.readyState === 'open') {
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('File transfer stalled.')), 20000);
+          const resume = () => { clearTimeout(timeout); resolve(); };
+          channel.addEventListener('bufferedamountlow', resume, { once: true });
+          if (channel.bufferedAmount <= 512 * 1024) resume();
+        });
+      }
+      if (channel.readyState !== 'open') throw new Error('The file transfer connection closed.');
+      channel.send(JSON.stringify({ type: 'file-part', id, i, chunk: chunks[i] }));
+    }
+    channel.send(JSON.stringify({ type: 'file-end', id }));
+  }
 
-  function drawRemote(data) { const c = canvasRef.current; if (!c) return; const ctx = c.getContext('2d'); ctx.strokeStyle = data.tool === 'eraser' ? '#101521' : data.color; ctx.lineWidth = data.width; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(data.x0 * c.width, data.y0 * c.height); ctx.lineTo(data.x1 * c.width, data.y1 * c.height); ctx.stroke(); }
-  function drawStart(e) { const c = canvasRef.current; if (!c) return; drawing.current = true; c.setPointerCapture(e.pointerId); drawing.current = { x: e.nativeEvent.offsetX / c.clientWidth, y: e.nativeEvent.offsetY / c.clientHeight }; }
-  function drawMove(e) { if (!drawing.current || typeof drawing.current !== 'object') return; const c = canvasRef.current; const data = { x0: drawing.current.x, y0: drawing.current.y, x1: e.nativeEvent.offsetX / c.clientWidth, y1: e.nativeEvent.offsetY / c.clientHeight, color, width: stroke, tool }; drawRemote(data); socket?.emit('board:draw', data); drawing.current = { x: data.x1, y: data.y1 }; }
-  function clearCanvas(emit = true) { const c = canvasRef.current; c?.getContext('2d').clearRect(0, 0, c.width, c.height); if (emit) socket?.emit('board:clear'); }
+  function uploadFile(file) {
+    if (!file || file.size > 12 * 1024 * 1024) { setMediaError('Files must be smaller than 12 MB.'); return; }
+    if (peers.current.size === 0) { setMediaError('A peer must be connected before you can share a file.'); return; }
+    const reader = new FileReader();
+    reader.onerror = () => setMediaError('Could not read that file. Please try another file.');
+    reader.onload = () => {
+      const data = String(reader.result);
+      const id = crypto.randomUUID();
+      peers.current.forEach(pc => {
+        const queue = pc.fileQueue || Promise.resolve();
+        pc.fileQueue = queue.then(() => transmitFile(pc.fileChannel, file, data, id)).catch(error => setMediaError(error.message || ('Could not send ' + file.name + ' to a participant.')));
+      });
+      setChat(current => [...current, { id: crypto.randomUUID(), name: displayName || user?.name || 'You', text: 'Shared a file: ' + file.name, file: data, fileName: file.name, fileType: file.type, time: new Date().toISOString() }]);
+    };
+    reader.readAsDataURL(file);
+  }
 
-  useEffect(() => { if (view !== 'meeting' || side !== 'board') return; const c = canvasRef.current; if (!c) return; const resize = () => { const rect = c.getBoundingClientRect(); const snapshot = c.toDataURL(); c.width = rect.width; c.height = rect.height; const img = new Image(); img.onload = () => c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); img.src = snapshot; }; resize(); window.addEventListener('resize', resize); return () => window.removeEventListener('resize', resize); }, [view, side]);
+  function paintBoardOperation(data) { const c = canvasRef.current; if (!c) return; const ctx = c.getContext('2d'); ctx.strokeStyle = data.tool === 'eraser' ? '#101521' : data.color; ctx.lineWidth = data.width; ctx.lineCap = 'round'; const x0=data.x0*c.width, y0=data.y0*c.height, x1=data.x1*c.width, y1=data.y1*c.height; ctx.beginPath(); if (data.tool === 'rect') ctx.rect(x0,y0,x1-x0,y1-y0); else if (data.tool === 'circle') ctx.ellipse((x0+x1)/2,(y0+y1)/2,Math.abs(x1-x0)/2,Math.abs(y1-y0)/2,0,0,Math.PI*2); else { ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); } ctx.stroke(); }
+  function drawRemote(data) { boardOperations.current.push(data); if (boardOperations.current.length > 5000) boardOperations.current.shift(); paintBoardOperation(data); }
+  function redrawBoard() { const c=canvasRef.current; if (!c) return; c.getContext('2d').clearRect(0,0,c.width,c.height); for (const operation of boardOperations.current) paintBoardOperation(operation); }
+  function drawStart(e) { const c = canvasRef.current; if (!c) return; c.setPointerCapture(e.pointerId); drawing.current = { x: e.nativeEvent.offsetX / c.clientWidth, y: e.nativeEvent.offsetY / c.clientHeight }; if (tool === 'rect' || tool === 'circle') drawing.current.tool = tool; }
+  function drawMove(e) { if (!drawing.current) return; const c = canvasRef.current; const data = { x0: drawing.current.x, y0: drawing.current.y, x1: e.nativeEvent.offsetX / c.clientWidth, y1: e.nativeEvent.offsetY / c.clientHeight, color, width: stroke, tool }; if (tool === 'pen' || tool === 'eraser') { drawRemote(data); socketRef.current?.emit('board:draw', data); drawing.current = { ...drawing.current, x: data.x1, y: data.y1 }; } }
+  function drawEnd(e) { if (!drawing.current) return; if (drawing.current.tool) { const c = canvasRef.current; const data = { x0: drawing.current.x, y0: drawing.current.y, x1: e.nativeEvent.offsetX / c.clientWidth, y1: e.nativeEvent.offsetY / c.clientHeight, color, width: stroke, tool: drawing.current.tool }; drawRemote(data); socketRef.current?.emit('board:draw', data); } drawing.current = null; }
+  function clearCanvas(emit = true) { boardOperations.current = []; const c = canvasRef.current; c?.getContext('2d').clearRect(0, 0, c.width, c.height); if (emit) socketRef.current?.emit('board:clear'); }
+
+  useEffect(() => { if (view !== 'meeting' || side !== 'board') return; const c = canvasRef.current; if (!c) return; const resize = () => { const rect = c.getBoundingClientRect(); c.width = rect.width; c.height = rect.height; redrawBoard(); }; resize(); window.addEventListener('resize', resize); return () => window.removeEventListener('resize', resize); }, [view, side]);
   useEffect(() => { if (view === 'home') { const id = new URLSearchParams(location.search).get('room'); if (id) setRoomInput(id); } }, [view]);
 
   const previewVideo = (stream, muted = false) => { const ref = node => { if (node && node.srcObject !== stream) node.srcObject = stream; }; return <video ref={ref} autoPlay playsInline muted={muted} />; };
@@ -142,7 +254,7 @@ function App() {
 
   if (view === 'meeting') return <div className="meeting-shell"><header className="meeting-top"><button className="brand" onClick={leaveRoom}><span className="brand-mark"><Video size={17}/></span>orbit</button><div className="meeting-meta"><span className={`live-dot ${connected ? '' : 'offline'}`} />{connected ? 'Live room' : 'Connecting'}<span className="dot-sep">·</span><span className="room-code">{roomId}</span><button className="icon-button subtle" onClick={copyInvite} title="Copy invite link">{copied ? <Check size={15}/> : <Copy size={15}/>}<span>{copied ? 'Copied' : 'Invite'}</span></button></div><div className="header-right"><span className="secure-tag"><Shield size={13}/>Private</span><div className="avatar small-avatar">{(displayName || 'G')[0].toUpperCase()}</div></div></header>
     {mediaError && <div className="meeting-alert">{mediaError}<button onClick={() => setMediaError('')}><X size={15}/></button></div>}
-    <main className="meeting-main"><section className={`stage ${side !== 'none' ? 'with-panel' : ''}`}>{side === 'board' ? <div className="board-stage"><div className="board-head"><div><span className="eyebrow">COLLABORATIVE CANVAS</span><h2>Shared whiteboard</h2></div><div className="board-tools"><button className={tool === 'pen' ? 'tool-active' : ''} onClick={() => setTool('pen')} title="Pencil"><PenTool size={16}/></button><button className={tool === 'eraser' ? 'tool-active' : ''} onClick={() => setTool('eraser')} title="Eraser"><Eraser size={16}/></button><label className="color-label" title="Stroke color"><input type="color" value={color} onChange={e => setColor(e.target.value)}/></label><input aria-label="Stroke width" type="range" min="1" max="16" value={stroke} onChange={e => setStroke(+e.target.value)}/><button onClick={() => clearCanvas()} title="Clear board"><Trash2 size={16}/></button></div></div><canvas ref={canvasRef} onPointerDown={drawStart} onPointerMove={drawMove} onPointerUp={() => {drawing.current = false}} onPointerLeave={() => {drawing.current = false}}/></div> : <div className={`video-grid count-${Math.min(participants.length + 1, 9)}`}><div className={`video-tile self-tile ${sharing ? 'featured' : ''}`}>{sharing ? previewVideo(shareRef.current, true) : localStream ? previewVideo(localStream, true) : <div className="camera-off"><VideoOff size={25}/></div>}<div className="tile-info"><span className="tile-avatar">{(displayName || user?.name || 'Y')[0]?.toUpperCase()}</span><span>{displayName || user?.name || 'You'}{!micOn && ' · muted'}</span><span className="tile-you">You</span></div></div>{participants.map((p, i) => <div className="video-tile" key={p.id}>{p.stream ? previewVideo(p.stream) : <div className={`participant-placeholder hue-${i % 6}`}><span>{p.name?.slice(0,1)?.toUpperCase() || 'G'}</span><small>Connecting…</small></div>}<div className="tile-info"><span className="tile-avatar remote">{p.name?.slice(0,1)?.toUpperCase() || 'G'}</span><span>{p.name || 'Guest'}</span></div></div>)}{participants.length === 0 && <div className="waiting-card"><div className="waiting-icon"><Users size={21}/></div><strong>Your room is ready</strong><span>Invite someone to start the conversation.</span><button className="outline small" onClick={copyInvite}><Link2 size={15}/> Copy invite link</button></div>}</div>}</section>
+    <main className="meeting-main"><section className={`stage ${side !== 'none' ? 'with-panel' : ''}`}>{side === 'board' ? <div className="board-stage"><div className="board-head"><div><span className="eyebrow">COLLABORATIVE CANVAS</span><h2>Shared whiteboard</h2></div><div className="board-tools"><button className={tool === 'pen' ? 'tool-active' : ''} onClick={() => setTool('pen')} title="Pencil"><PenTool size={16}/></button><button className={tool === 'eraser' ? 'tool-active' : ''} onClick={() => setTool('eraser')} title="Eraser"><Eraser size={16}/></button><button className={tool === 'rect' ? 'tool-active' : ''} onClick={() => setTool('rect')} title="Rectangle"><Square size={16}/></button><button className={tool === 'circle' ? 'tool-active' : ''} onClick={() => setTool('circle')} title="Ellipse"><Circle size={16}/></button><label className="color-label" title="Stroke color"><input type="color" value={color} onChange={e => setColor(e.target.value)}/></label><input aria-label="Stroke width" type="range" min="1" max="16" value={stroke} onChange={e => setStroke(+e.target.value)}/><button onClick={() => clearCanvas()} title="Clear board"><Trash2 size={16}/></button></div></div><canvas ref={canvasRef} onPointerDown={drawStart} onPointerMove={drawMove} onPointerUp={drawEnd} onPointerCancel={drawEnd}/></div> : <div className={`video-grid count-${Math.min(participants.length + 1, 9)}`}><div className={`video-tile self-tile ${sharing ? 'featured' : ''}`}>{sharing ? previewVideo(shareRef.current, true) : localStream ? previewVideo(localStream, true) : <div className="camera-off"><VideoOff size={25}/></div>}<div className="tile-info"><span className="tile-avatar">{(displayName || user?.name || 'Y')[0]?.toUpperCase()}</span><span>{displayName || user?.name || 'You'}{!micOn && ' · muted'}</span><span className="tile-you">You</span></div></div>{participants.map((p, i) => <div className={`video-tile ${p.sharing ? 'featured' : ''}`} key={p.id}>{p.stream ? previewVideo(p.stream) : <div className={`participant-placeholder hue-${i % 6}`}><span>{p.name?.slice(0,1)?.toUpperCase() || 'G'}</span><small>Connecting…</small></div>}<div className="tile-info"><span className="tile-avatar remote">{p.name?.slice(0,1)?.toUpperCase() || 'G'}</span><span>{p.name || 'Guest'}{p.sharing ? ' · sharing screen' : ''}</span></div></div>)}{participants.length === 0 && <div className="waiting-card"><div className="waiting-icon"><Users size={21}/></div><strong>Your room is ready</strong><span>Invite someone to start the conversation.</span><button className="outline small" onClick={copyInvite}><Link2 size={15}/> Copy invite link</button></div>}</div>}</section>
     {side !== 'none' && <aside className="side-panel"><div className="panel-head"><div><span className="eyebrow">{side === 'chat' ? 'ROOM CONVERSATION' : side === 'people' ? 'IN THIS ROOM' : 'ROOM FILES'}</span><h3>{side === 'chat' ? 'Messages' : side === 'people' ? `People (${participants.length + 1})` : 'Shared files'}</h3></div><button className="icon-button" onClick={() => setSide('none')}><X size={17}/></button></div>{side === 'chat' ? <><div className="messages-list">{chat.length === 0 && <div className="empty-chat"><div className="empty-chat-icon"><MessageSquare size={21}/></div><strong>Say hello</strong><span>Messages sent here are visible to everyone in the room.</span></div>}{chat.map(item => <div className="message-row" key={item.id}><div className="avatar msg-avatar">{(item.name || 'G')[0].toUpperCase()}</div><div className="msg-content"><div className="msg-meta"><strong>{item.name}</strong><time>{new Date(item.time).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}</time></div>{chatText(item)}</div></div>)}</div><form className="composer" onSubmit={sendMessage}><label className="attach-button" title="Share file"><Paperclip size={17}/><input type="file" hidden onChange={e => {uploadFile(e.target.files?.[0]); e.target.value = '';}}/></label><input value={message} onChange={e => setMessage(e.target.value)} placeholder="Message everyone…" maxLength={2000}/><button disabled={!message.trim()}><Send size={16}/></button></form></> : side === 'people' ? <div className="people-list"><div className="person-row"><div className="avatar">{(displayName || 'Y')[0]?.toUpperCase()}</div><div><strong>{displayName || 'You'}</strong><span>You · Host</span></div><span className="mic-status">{micOn ? <Mic size={14}/> : <MicOff size={14}/>}</span></div>{participants.map(p => <div className="person-row" key={p.id}><div className="avatar remote">{(p.name || 'G')[0]?.toUpperCase()}</div><div><strong>{p.name}</strong><span>In this meeting</span></div></div>)}</div> : <div className="messages-list">{chat.filter(c => c.file).map(item => <div className="file-card"><Paperclip size={17}/><span>{item.fileName}</span><a href={item.file} download={item.fileName}><ArrowRight size={15}/></a></div>)}{chat.filter(c => c.file).length === 0 && <div className="empty-chat"><div className="empty-chat-icon"><Paperclip size={20}/></div><strong>No files yet</strong><span>Share documents with everyone in your meeting.</span><label className="outline small file-pick">Share a file<input type="file" hidden onChange={e => {uploadFile(e.target.files?.[0]); e.target.value='';}}/></label></div>}</div>}</aside>}</main>
     <footer className="control-bar"><div className="control-left"><span className="meeting-clock"><span className="live-dot"/>{new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}</span><span className="control-divider"/><span className="participant-count"><Users size={15}/>{participants.length + 1}</span></div><div className="controls"><button className={`control-btn ${!micOn ? 'control-off' : ''}`} onClick={toggleMic} title={micOn ? 'Mute microphone' : 'Unmute microphone'}>{micOn ? <Mic size={19}/> : <MicOff size={19}/>}<span>{micOn ? 'Mute' : 'Unmute'}</span></button><button className={`control-btn ${!camOn ? 'control-off' : ''}`} onClick={toggleCam} title="Toggle camera">{camOn ? <Video size={19}/> : <VideoOff size={19}/>}<span>{camOn ? 'Camera' : 'Start video'}</span></button><button className="control-btn camera-switch" onClick={switchCamera} title="Switch camera"><Camera size={18}/><span>Flip</span></button><button className={`control-btn share-control ${sharing ? 'selected' : ''}`} onClick={toggleShare} title="Share screen"><MonitorUp size={19}/><span>{sharing ? 'Stop share' : 'Share'}</span></button><button className={`control-btn ${side === 'board' ? 'selected' : ''}`} onClick={() => setSide(side === 'board' ? 'none' : 'board')} title="Whiteboard"><PenTool size={19}/><span>Board</span></button><button className="leave-btn" onClick={leaveRoom} title="Leave meeting"><PhoneOff size={19}/><span>Leave</span></button></div><div className="control-right"><button className={`panel-toggle ${side === 'chat' ? 'selected' : ''}`} onClick={() => setSide(side === 'chat' ? 'none' : 'chat')} title="Chat"><MessageSquare size={18}/><span>Chat</span>{chat.length > 0 && <i/>}</button><button className={`panel-toggle ${side === 'people' ? 'selected' : ''}`} onClick={() => setSide(side === 'people' ? 'none' : 'people')} title="People"><Users size={18}/><span>People</span></button><button className={`panel-toggle ${side === 'files' ? 'selected' : ''}`} onClick={() => setSide(side === 'files' ? 'none' : 'files')} title="Files"><Paperclip size={18}/><span>Files</span></button></div></footer>
   </div>;
