@@ -7,11 +7,11 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import mongoose from 'mongoose';
-import jwt from 'jsonwebtoken';
 import { Server } from 'socket.io';
 import authRoutes from './routes/auth.js';
 import roomRoutes from './routes/rooms.js';
 import { configureSockets } from './socket.js';
+import { connectStorage } from './storage.js';
 
 const required = ['JWT_SECRET', 'MONGODB_URI'];
 for (const key of required) if (!process.env[key]) throw new Error(`${key} must be set in server/.env`);
@@ -48,6 +48,6 @@ const shutdown = async signal => { console.log(`Received ${signal}; closing serv
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 });
+await connectStorage();
 const port = Number(process.env.PORT || 5000);
 server.listen(port, () => console.log(`Orbit API and signaling listening on port ${port}`));

@@ -1,7 +1,6 @@
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
-import User from './models/User.js';
-import Room from './models/Room.js';
+import { findUserById, touchOrCreateSocketRoom } from './storage.js';
 
 const roomSchema = z.string().regex(/^[A-Z0-9_-]{3,40}$/);
 const textSchema = z.string().trim().min(1).max(2000);
@@ -14,7 +13,7 @@ export function configureSockets(io) {
       const raw = socket.handshake.auth?.token;
       if (!raw) { socket.data.user = null; return next(); }
       const claims = jwt.verify(raw, process.env.JWT_SECRET, { algorithms: ['HS256'], issuer: 'orbit-meet', audience: 'orbit-client' });
-      const user = await User.findById(claims.sub).select('name email').lean();
+      const user = await findUserById(claims.sub);
       if (!user) return next(new Error('Account not found.'));
       socket.data.user = { id: user._id.toString(), name: user.name };
       return next();
@@ -31,7 +30,7 @@ export function configureSockets(io) {
       if (!parsedRoom.success || !parsedName.success) { socket.emit('room:error', { message: 'Use a valid room code and display name.' }); return; }
       try {
         const roomId = parsedRoom.data;
-        await Room.updateOne({ roomId }, { $setOnInsert: { roomId, createdBy: socket.data.user?.id || null, title: 'Meeting room' }, $set: { lastActiveAt: new Date() } }, { upsert: true });
+        await touchOrCreateSocketRoom(roomId, socket.data.user?.id || null);
         if (activeRoom && activeRoom !== roomId) {
           const previousRoom = activeRoom;
           await socket.leave(previousRoom);

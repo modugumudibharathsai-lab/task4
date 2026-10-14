@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import { Video, Mic, MicOff, VideoOff, MonitorUp, PhoneOff, MessageSquare, Users, PenTool, Paperclip, Copy, Shield, Plus, ArrowRight, X, Send, Camera, Circle, Eraser, Trash2, Link2, Check, Wifi, Sparkles, Square } from 'lucide-react';
 
-const API = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:4000' : window.location.origin);
+const API = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? '' : window.location.origin);
 const tokenKey = 'orbit_token';
 const iceConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, ...(import.meta.env.VITE_TURN_URL ? [{ urls: import.meta.env.VITE_TURN_URL, username: import.meta.env.VITE_TURN_USERNAME, credential: import.meta.env.VITE_TURN_CREDENTIAL }] : [])] };
 

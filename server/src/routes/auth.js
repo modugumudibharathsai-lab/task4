@@ -2,7 +2,7 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
-import User from '../models/User.js';
+import { createUser, findUserByEmail } from '../storage.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
@@ -16,8 +16,8 @@ router.post('/signup', async (req, res, next) => {
     const parsed = z.object({ name: z.string().trim().min(2).max(60), email, password }).strict().safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'Enter a name, valid email, and password of at least 8 characters.' });
     const data = parsed.data;
-    if (await User.exists({ email: data.email })) return res.status(409).json({ error: 'An account with that email already exists.' });
-    const user = await User.create({ name: data.name, email: data.email, passwordHash: await bcrypt.hash(data.password, 12) });
+    if (await findUserByEmail(data.email)) return res.status(409).json({ error: 'An account with that email already exists.' });
+    const user = await createUser({ name: data.name, email: data.email, passwordHash: await bcrypt.hash(data.password, 12) });
     return res.status(201).json({ token: issue(user), user: profile(user) });
   } catch (err) { if (err?.code === 11000) return res.status(409).json({ error: 'An account with that email already exists.' }); return next(err); }
 });
@@ -26,7 +26,7 @@ router.post('/login', async (req, res, next) => {
   try {
     const parsed = z.object({ email, password }).strict().safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'Enter a valid email and password.' });
-    const user = await User.findOne({ email: parsed.data.email }).select('+passwordHash');
+    const user = await findUserByEmail(parsed.data.email, true);
     if (!user || !await bcrypt.compare(parsed.data.password, user.passwordHash)) return res.status(401).json({ error: 'Email or password is incorrect.' });
     return res.json({ token: issue(user), user: profile(user) });
   } catch (err) { return next(err); }

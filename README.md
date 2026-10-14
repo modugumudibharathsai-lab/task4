@@ -28,12 +28,12 @@ package.json           Workspace commands
 
 ## Run locally
 
-1. Copy `server/.env.example` to `server/.env` and set `MONGODB_URI` and a unique random `JWT_SECRET` of at least 32 characters. Keep `.env` out of source control.
+1. Copy `server/.env.example` to `server/.env` and set a unique random `JWT_SECRET` of at least 32 characters. For local preview without installing MongoDB, keep `DEV_MEMORY_STORE=true`; accounts and room metadata then exist only until the server restarts. To retain local data, install MongoDB and set `DEV_MEMORY_STORE=false` with a reachable `MONGODB_URI`. Keep `.env` out of source control.
 2. From the repository root, run `npm install`.
 3. Run both apps with `npm run dev`.
 4. Open `http://localhost:5173`, create an account, and start a meeting. Share the meeting code or invite link to join from another browser or device.
 
-The client defaults to `http://localhost:4000` for the API and signaling server. Set `VITE_API_URL` in `client/.env.local` if the server is hosted elsewhere. Set `CLIENT_ORIGIN` on the server to the exact allowed client origin; comma-separate origins when needed. The API defaults to port 4000.
+During local development, Vite proxies `/api` and `/socket.io` to the backend on port 4000, so the browser uses one local origin at `http://localhost:5173`. Set `VITE_API_URL` in `client/.env.local` only when the API is hosted elsewhere. Set `CLIENT_ORIGIN` on the server to the exact allowed client origin; comma-separate origins when needed. The API defaults to port 4000.
 
 ## TURN and deployment
 
@@ -44,6 +44,7 @@ Deploy the API behind HTTPS with WebSocket proxy support and the client over HTT
 ## Application behavior and limits
 
 - Sign up and sign in use bcrypt password hashing and JWT-protected profile/room API routes.
+- Local development can use an explicitly enabled in-memory store when `DEV_MEMORY_STORE=true` and `NODE_ENV` is not `production`; no account or room data is written to disk and it resets when the server restarts. Production ignores this option and always requires MongoDB.
 - Socket.IO validates and bounds chat, display names, signaling payloads, and drawing data. React renders chat as text, not HTML.
 - Video and audio use a peer-to-peer mesh. Each browser sends a separate stream to every other participant, so this implementation is best for small groups; use an SFU (such as LiveKit, mediasoup, or Janus) for larger rooms and production scale.
 - Whiteboard strokes synchronize while participants are connected; there is no durable board history or replay for late joiners.

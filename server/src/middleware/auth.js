@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import User from '../models/User.js';
+import { findUserById } from '../storage.js';
 
 export async function requireAuth(req, res, next) {
   const header = req.get('authorization') || '';
@@ -7,7 +7,7 @@ export async function requireAuth(req, res, next) {
   if (!match) return res.status(401).json({ error: 'Authentication required.' });
   try {
     const payload = jwt.verify(match[1], process.env.JWT_SECRET, { algorithms: ['HS256'] });
-    const user = await User.findById(payload.sub).select('name email').lean();
+    const user = await findUserById(payload.sub);
     if (!user) return res.status(401).json({ error: 'Account no longer exists.' });
     req.user = user;
     return next();
